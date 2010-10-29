@@ -57,16 +57,20 @@ module ThinkingSphinx
       ThinkingSphinx.facets *args
     end
     
-    def self.bundle_searches(enum = nil)
-      bundle = ThinkingSphinx::BundledSearch.new
+    def self.bundle_searches(enum)
+      client = ThinkingSphinx::Configuration.instance.client
       
-      if enum.nil?
-        yield bundle
-      else
-        enum.each { |item| yield bundle, item }
-      end
+      searches = enum.collect { |item|
+        search = yield ThinkingSphinx, item
+        search.append_to client
+        search
+      }
       
-      bundle.searches
+      client.run.each_with_index.collect { |results, index|
+        searches[index].populate_from_queue results
+      }
+      
+      searches
     end
     
     def self.matching_fields(fields, bitmask)
@@ -85,8 +89,6 @@ module ThinkingSphinx
       @array    = []
       @options  = args.extract_options!
       @args     = args
-      
-      add_default_scope unless options[:ignore_default]
       
       populate if @options[:populate]
     end
@@ -236,9 +238,14 @@ module ThinkingSphinx
       return options[:index] if options[:index]
       return '*' if classes.empty?
       
-      classes.collect { |klass|
-        klass.sphinx_index_names
-      }.flatten.uniq.join(',')
+
+      c = classes_indexes.join(',')
+      
+      if options[:locale]
+        c = lang_multi_index
+      end
+
+      c
     end
     
     def each_with_groupby_and_count(&block)
@@ -272,24 +279,16 @@ module ThinkingSphinx
       
       populate
       client.excerpts(
-        {
-          :docs   => [string],
-          :words  => results[:words].keys.join(' '),
-          :index  => options[:index] || "#{model.source_of_sphinx_index.sphinx_name}_core"
-        }.merge(options[:excerpt_options] || {})
+        :docs   => [string],
+        :words  => results[:words].keys.join(' '),
+        :index  => options[:index] || "#{model.source_of_sphinx_index.sphinx_name}_core"
       ).first
     end
     
     def search(*args)
-      args << args.extract_options!.merge(:ignore_default => true)
+      add_default_scope
       merge_search ThinkingSphinx::Search.new(*args)
       self
-    end
-    
-    def client
-      client = options[:client] || config.client
-      
-      prepare client
     end
     
     def append_to(client)
@@ -316,6 +315,28 @@ module ThinkingSphinx
     end
     
     private
+    
+    def lang_multi_index
+      locale_indexes = []
+
+      classes.each do |klass|
+        i = klass.sphinx_index_names
+        (options[:locale].is_a?(Array) ? options[:locale] : [options[:locale]]).each do |locale|
+          lang_index = i.grep(/_#{locale.to_s}_core/)
+          main_index = lang_index.last[0..-9].singularize+'_core' rescue []
+          locale_indexes << main_index if i.include?(main_index)
+          locale_indexes << lang_index
+        end
+      end
+      
+      locale_indexes.flatten.uniq.join(',')
+    end
+    
+    def classes_indexes
+      classes.collect { |klass|
+        klass.sphinx_index_names
+      }.flatten.uniq
+    end
     
     def config
       ThinkingSphinx::Configuration.instance
@@ -392,21 +413,20 @@ module ThinkingSphinx
     
     def self.log(message, method = :debug, identifier = 'Sphinx')
       return if ::ActiveRecord::Base.logger.nil?
-      
-      info = ''
-      if ::ActiveRecord::LogSubscriber.colorize_logging
-        identifier_color, message_color = "4;32;1", "0" # 0;1 = Bold
-        info << "  \e[#{identifier_color}m#{identifier}\e[0m   "
-        info << "\e[#{message_color}m#{message}\e[0m"
-      else
-        info = "#{identifier}   #{message}"
-      end
-      
+      identifier_color, message_color = "4;32;1", "0" # 0;1 = Bold
+      info = "  \e[#{identifier_color}m#{identifier}\e[0m   "
+      info << "\e[#{message_color}m#{message}\e[0m"
       ::ActiveRecord::Base.logger.send method, info
     end
     
     def log(*args)
       self.class.log(*args)
+    end
+    
+    def client
+      client = config.client
+      
+      prepare client
     end
     
     def prepare(client)
@@ -797,12 +817,10 @@ MSG
     
     # Adds the default_sphinx_scope if set.
     def add_default_scope
-      return unless one_class && one_class.has_default_sphinx_scope?
-      add_scope(one_class.get_default_sphinx_scope.to_sym)
+      add_scope(one_class.get_default_sphinx_scope) if one_class && one_class.has_default_sphinx_scope?
     end
     
     def add_scope(method, *args, &block)
-      method = "#{method}_without_default".to_sym
       merge_search one_class.send(method, *args, &block)
     end
     
