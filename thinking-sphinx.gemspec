@@ -191,7 +191,7 @@ http://freelancing-god.github.com/ts/en/upgrading.html
     s.specification_version = 3
 
     if Gem::Version.new(Gem::VERSION) >= Gem::Version.new('1.2.0') then
-      s.add_runtime_dependency(%q<activerecord>, [">= 3.0.0"])
+      s.add_runtime_dependency(%q<activerecord>, [">= 3.0.0.rc2"])
       s.add_runtime_dependency(%q<riddle>, [">= 1.0.12"])
       s.add_development_dependency(%q<mysql>, ["= 2.8.1"])
       s.add_development_dependency(%q<pg>, ["= 0.9.0"])
