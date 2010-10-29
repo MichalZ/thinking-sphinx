@@ -1,4 +1,4 @@
-gem 'activerecord', '>= 3.0.0'
+gem 'activerecord', '>= 3.0.0.rc2'
 gem 'riddle',       '>= 1.0.12'
 
 group :development do
