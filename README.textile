@@ -188,3 +188,8 @@ Since I first released this library, there's been quite a few people who have su
 * Keith Pitt
 * Lee Capps
 * Sam Goldstein
+* Artem Orlov
+* Matt Todd
+* Ivan Ukhov
+* Stephen Celis
+* Paco Guzmán

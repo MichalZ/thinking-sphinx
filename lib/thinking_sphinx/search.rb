@@ -29,36 +29,40 @@ module ThinkingSphinx
     
     # Deprecated. Use ThinkingSphinx.search
     def self.search(*args)
-      log 'ThinkingSphinx::Search.search is deprecated. Please use ThinkingSphinx.search instead.'
+      warn 'ThinkingSphinx::Search.search is deprecated. Please use ThinkingSphinx.search instead.'
       ThinkingSphinx.search *args
     end
     
     # Deprecated. Use ThinkingSphinx.search_for_ids
     def self.search_for_ids(*args)
-      log 'ThinkingSphinx::Search.search_for_ids is deprecated. Please use ThinkingSphinx.search_for_ids instead.'
+      warn 'ThinkingSphinx::Search.search_for_ids is deprecated. Please use ThinkingSphinx.search_for_ids instead.'
       ThinkingSphinx.search_for_ids *args
     end
     
     # Deprecated. Use ThinkingSphinx.search_for_ids
     def self.search_for_id(*args)
-      log 'ThinkingSphinx::Search.search_for_id is deprecated. Please use ThinkingSphinx.search_for_id instead.'
+      warn 'ThinkingSphinx::Search.search_for_id is deprecated. Please use ThinkingSphinx.search_for_id instead.'
       ThinkingSphinx.search_for_id *args
     end
     
     # Deprecated. Use ThinkingSphinx.count
     def self.count(*args)
-      log 'ThinkingSphinx::Search.count is deprecated. Please use ThinkingSphinx.count instead.'
+      warn 'ThinkingSphinx::Search.count is deprecated. Please use ThinkingSphinx.count instead.'
       ThinkingSphinx.count *args
     end
     
     # Deprecated. Use ThinkingSphinx.facets
     def self.facets(*args)
-      log 'ThinkingSphinx::Search.facets is deprecated. Please use ThinkingSphinx.facets instead.'
+      warn 'ThinkingSphinx::Search.facets is deprecated. Please use ThinkingSphinx.facets instead.'
       ThinkingSphinx.facets *args
     end
-    
-    def self.bundle_searches(enum)
-      client = ThinkingSphinx::Configuration.instance.client
+
+    def self.warn(message)
+      ::ActiveSupport::Deprecation.warn message
+    end
+
+    def self.bundle_searches(enum = nil)
+      bundle = ThinkingSphinx::BundledSearch.new
       
       searches = enum.collect { |item|
         search = yield ThinkingSphinx, item
@@ -104,6 +108,11 @@ module ThinkingSphinx
       self
     end
     
+    def as_json(*args)
+      populate
+      @array.as_json(*args)
+    end
+    
     # Indication of whether the request has been made to Sphinx for the search
     # query.
     # 
@@ -127,7 +136,7 @@ module ThinkingSphinx
         add_scope(method, *args, &block)
         return self
       elsif method == :search_count
-        merge_search one_class.search(*args)
+        merge_search one_class.search(*args), self.args, options
         return scoped_count
       elsif method.to_s[/^each_with_.*/].nil? && !@array.respond_to?(method)
         super
@@ -279,16 +288,41 @@ module ThinkingSphinx
       
       populate
       client.excerpts(
-        :docs   => [string],
-        :words  => results[:words].keys.join(' '),
-        :index  => options[:index] || "#{model.source_of_sphinx_index.sphinx_name}_core"
+        {
+          :docs   => [string.to_s],
+          :words  => results[:words].keys.join(' '),
+          :index  => options[:index] || "#{model.source_of_sphinx_index.sphinx_name}_core"
+        }.merge(options[:excerpt_options] || {})
       ).first
     end
     
     def search(*args)
-      add_default_scope
-      merge_search ThinkingSphinx::Search.new(*args)
+      args << args.extract_options!.merge(:ignore_default => true)
+      merge_search ThinkingSphinx::Search.new(*args), self.args, options
       self
+    end
+    
+    def search_for_ids(*args)
+      args << args.extract_options!.merge(
+        :ignore_default => true,
+        :ids_only       => true
+      )
+      merge_search ThinkingSphinx::Search.new(*args), self.args, options
+      self
+    end
+    
+    def facets(*args)
+      options = args.extract_options!
+      merge_search self, args, options
+      args << options
+      
+      ThinkingSphinx::FacetSearch.new *args
+    end
+    
+    def client
+      client = options[:client] || config.client
+      
+      prepare client
     end
     
     def append_to(client)
@@ -348,12 +382,11 @@ module ThinkingSphinx
       
       retry_on_stale_index do
         begin
-          log "Querying: '#{query}'"
-          runtime = Benchmark.realtime {
+          log query do
             @results = client.query query, indexes, comment
-          }
-          log "Found #{@results[:total_found]} results", :debug,
-            "Sphinx (#{sprintf("%f", runtime)}s)"
+          end
+          total = @results[:total_found].to_i
+          log "Found #{total} result#{'s' unless total == 1}"
         rescue Errno::ECONNREFUSED => err
           raise ThinkingSphinx::ConnectionError,
             'Connection to Sphinx Daemon (searchd) failed.'
@@ -410,29 +443,28 @@ module ThinkingSphinx
         match[:attributes]['class_crc'] == object.class.to_crc32
       }
     end
-    
-    def self.log(message, method = :debug, identifier = 'Sphinx')
-      return if ::ActiveRecord::Base.logger.nil?
-      identifier_color, message_color = "4;32;1", "0" # 0;1 = Bold
-      info = "  \e[#{identifier_color}m#{identifier}\e[0m   "
-      info << "\e[#{message_color}m#{message}\e[0m"
-      ::ActiveRecord::Base.logger.send method, info
+
+    def self.log(message, &block)
+      return if ThinkingSphinx::ActiveRecord::LogSubscriber.logger.nil?
+
+      if block_given?
+        ::ActiveSupport::Notifications.
+          instrument('query.thinking_sphinx', :query => message, &block)
+      else
+        ::ActiveSupport::Notifications.
+          instrument('message.thinking_sphinx', :message => message)
+      end
+
     end
-    
-    def log(*args)
-      self.class.log(*args)
+
+    def log(query, &block)
+      self.class.log(query, &block)
     end
-    
-    def client
-      client = config.client
-      
-      prepare client
-    end
-    
+
     def prepare(client)
       index_options = one_class ?
         one_class.sphinx_indexes.first.local_options : {}
-      
+
       [
         :max_matches, :group_by, :group_function, :group_clause,
         :group_distinct, :id_range, :cut_off, :retry_count, :retry_delay,
@@ -478,8 +510,8 @@ module ThinkingSphinx
         stale_ids |= err.ids
         # ID exclusion
         options[:without_ids] = Array(options[:without_ids]) | err.ids
-        
-        log 'Sphinx Stale Ids (%s %s left): %s' % [
+
+        log 'Stale Ids (%s %s left): %s' % [
           retries, (retries == 1 ? 'try' : 'tries'), stale_ids.join(', ')
         ]
         retry
@@ -520,7 +552,8 @@ module ThinkingSphinx
       query.gsub(/("#{token}(.*?#{token})?"|(?![!-])#{token})/u) do
         pre, proper, post = $`, $&, $'
         # E.g. "@foo", "/2", "~3", but not as part of a token
-        is_operator = pre.match(%r{(\W|^)[@~/]\Z})
+        is_operator = pre.match(%r{(\W|^)[@~/]\Z}) ||
+                      pre.match(%r{(\W|^)@\([^\)]*$})
         # E.g. "foo bar", with quotes
         is_quote    = proper.starts_with?('"') && proper.ends_with?('"')
         has_star    = pre.ends_with?("*") || post.starts_with?("*")
@@ -634,24 +667,8 @@ module ThinkingSphinx
       filters
     end
     
-    def condition_filters
-      (options[:conditions] || {}).collect { |attrib, value|
-        if attributes.include?(attrib.to_sym)
-          puts <<-MSG
-Deprecation Warning: filters on attributes should be done using the :with
-option, not :conditions. For example:
-  :with => {:#{attrib} => #{value.inspect}}
-MSG
-          Riddle::Client::Filter.new attrib.to_s, filter_value(value)
-        else
-          nil
-        end
-      }.compact
-    end
-    
     def filters
       internal_filters +
-      condition_filters +
       (options[:with] || {}).collect { |attrib, value|
         Riddle::Client::Filter.new attrib.to_s, filter_value(value)
       } +
@@ -739,6 +756,45 @@ MSG
       end
     end
     
+    def include_for_class(klass)
+      includes = options[:include] || klass.sphinx_index_options[:include]
+      
+      case includes
+      when NilClass
+        nil
+      when Array
+        include_from_array includes, klass
+      when Symbol
+        klass.reflections[includes].nil? ? nil : includes
+      when Hash
+        include_from_hash includes, klass
+      else
+        includes
+      end
+    end
+
+    def include_from_array(array, klass)
+      scoped_array = []
+      array.each do |value|
+        case value
+        when Hash
+          scoped_hash = include_from_hash(value, klass)
+          scoped_array << scoped_hash unless scoped_hash.nil?
+        else
+          scoped_array << value unless klass.reflections[value].nil?
+        end
+      end
+      scoped_array.empty? ? nil : scoped_array
+    end
+    
+    def include_from_hash(hash, klass)
+      scoped_hash = {}
+      hash.keys.each do |key|
+        scoped_hash[key] = hash[key] unless klass.reflections[key].nil?
+      end
+      scoped_hash.empty? ? nil : scoped_hash
+    end
+    
     def instances_from_class(klass, matches)
       index_options = klass.sphinx_index_options
 
@@ -747,7 +803,7 @@ MSG
         :all,
         :joins      => options[:joins],
         :conditions => {klass.primary_key_for_sphinx.to_sym => ids},
-        :include    => (options[:include] || index_options[:include]),
+        :include    => include_for_class(klass),
         :select     => (options[:select]  || index_options[:select]),
         :order      => (options[:sql_order] || index_options[:sql_order])
       ) : []
@@ -821,10 +877,11 @@ MSG
     end
     
     def add_scope(method, *args, &block)
-      merge_search one_class.send(method, *args, &block)
+      method = "#{method}_without_default".to_sym
+      merge_search one_class.send(method, *args, &block), self.args, options
     end
     
-    def merge_search(search)
+    def merge_search(search, args, options)
       search.args.each { |arg| args << arg }
       
       search.options.keys.each do |key|

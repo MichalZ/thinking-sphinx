@@ -9,12 +9,13 @@ require 'bundler'
 
 Bundler.require :default, :development
 
+require 'active_support/core_ext/module/attribute_accessors'
 require "#{File.dirname(__FILE__)}/../lib/thinking_sphinx"
 require "#{File.dirname(__FILE__)}/sphinx_helper"
 
 Dir["#{File.dirname(__FILE__)}/support/**/*.rb"].each {|f| require f}
 
-ActiveRecord::Base.logger = Logger.new(StringIO.new)
+ThinkingSphinx::ActiveRecord::LogSubscriber.logger = Logger.new(StringIO.new)
 
 RSpec.configure do |config|
   %w( tmp tmp/config tmp/log tmp/db ).each do |path|
